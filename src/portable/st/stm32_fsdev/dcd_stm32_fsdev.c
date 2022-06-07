@@ -163,7 +163,7 @@ TU_VERIFY_STATIC(((DCD_STM32_BTABLE_BASE) % 8) == 0, "BTABLE base must be aligne
 typedef struct
 {
   uint8_t * buffer;
-  // tu_fifo_t * ff;  // TODO support dcd_edpt_xfer_fifo API
+  tu_fifo_t * ff;
   uint16_t total_len;
   uint16_t queued_len;
   uint16_t pma_ptr;
@@ -196,8 +196,8 @@ static void dcd_pma_free(uint8_t ep_addr);
 static bool dcd_write_packet_memory(uint16_t dst, const void *__restrict src, size_t wNBytes);
 static bool dcd_read_packet_memory(void *__restrict dst, uint16_t src, size_t wNBytes);
 
-//static bool dcd_write_packet_memory_ff(tu_fifo_t * ff, uint16_t dst, uint16_t wNBytes);
-//static bool dcd_read_packet_memory_ff(tu_fifo_t * ff, uint16_t src, uint16_t wNBytes);
+static bool dcd_write_packet_memory_ff(tu_fifo_t * ff, uint16_t dst, uint16_t wNBytes);
+static bool dcd_read_packet_memory_ff(tu_fifo_t * ff, uint16_t src, uint16_t wNBytes);
 
 // Using a function due to better type checks
 // This seems better than having to do type casts everywhere else
@@ -526,13 +526,11 @@ static void dcd_ep_ctr_rx_handler(uint32_t wIstr)
 
     if (count != 0U)
     {
-#if 0 // TODO support dcd_edpt_xfer_fifo API
       if (xfer->ff)
       {
         dcd_read_packet_memory_ff(xfer->ff, *pcd_ep_rx_address_ptr(USB,EPindex), count);
       }
       else
-#endif
       {
         dcd_read_packet_memory(&(xfer->buffer[xfer->queued_len]), *pcd_ep_rx_address_ptr(USB,EPindex), count);
       }
@@ -709,6 +707,7 @@ static uint16_t dcd_pma_alloc(uint8_t ep_addr, size_t length)
   uint8_t const dir   = tu_edpt_dir(ep_addr);
   xfer_ctl_t* epXferCtl = xfer_ctl_ptr(epnum,dir);
 
+  open_ep_count++;
   if(epXferCtl->pma_alloc_size != 0U)
   {
     //TU_LOG2("dcd_pma_alloc(%x,%x)=%x (cached)\r\n",ep_addr,length,epXferCtl->pma_ptr);
@@ -771,9 +770,8 @@ bool dcd_edpt_open (uint8_t rhport, tusb_desc_endpoint_t const * p_endpoint_desc
   const uint16_t epMaxPktSize = tu_edpt_packet_size(p_endpoint_desc);
   uint16_t pma_addr;
   uint32_t wType;
-  
+
   // Isochronous not supported (yet), and some other driver assumptions.
-  TU_ASSERT(p_endpoint_desc->bmAttributes.xfer != TUSB_XFER_ISOCHRONOUS);
   TU_ASSERT(epnum < MAX_EP_COUNT);
 
   // Set type
@@ -781,12 +779,9 @@ bool dcd_edpt_open (uint8_t rhport, tusb_desc_endpoint_t const * p_endpoint_desc
   case TUSB_XFER_CONTROL:
     wType = USB_EP_CONTROL;
     break;
-#if (0)
   case TUSB_XFER_ISOCHRONOUS: // FIXME: Not yet supported
     wType = USB_EP_ISOCHRONOUS;
     break;
-#endif
-
   case TUSB_XFER_BULK:
     wType = USB_EP_CONTROL;
     break;
@@ -812,7 +807,13 @@ bool dcd_edpt_open (uint8_t rhport, tusb_desc_endpoint_t const * p_endpoint_desc
     *pcd_ep_tx_address_ptr(USB, epnum) = pma_addr;
     pcd_set_ep_tx_cnt(USB, epnum, epMaxPktSize);
     pcd_clear_tx_dtog(USB, epnum);
-    pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_NAK);
+
+
+    if(wType == USB_EP_ISOCHRONOUS) {
+    	pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_DIS);
+    } else {
+    	pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_NAK);
+    }
   }
   else
   {
@@ -845,7 +846,7 @@ void dcd_edpt_close (uint8_t rhport, uint8_t ep_addr)
   (void)rhport;
   uint32_t const epnum = tu_edpt_number(ep_addr);
   uint32_t const dir   = tu_edpt_dir(ep_addr);
-  
+
   if(dir == TUSB_DIR_IN)
   {
     pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_DIS);
@@ -870,13 +871,11 @@ static void dcd_transmit_packet(xfer_ctl_t * xfer, uint16_t ep_ix)
   }
   uint16_t oldAddr = *pcd_ep_tx_address_ptr(USB,ep_ix);
 
-#if 0 // TODO support dcd_edpt_xfer_fifo API
   if (xfer->ff)
   {
     dcd_write_packet_memory_ff(xfer->ff, oldAddr, len);
   }
   else
-#endif
   {
     dcd_write_packet_memory(oldAddr, &(xfer->buffer[xfer->queued_len]), len);
   }
@@ -896,7 +895,7 @@ bool dcd_edpt_xfer (uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t 
   xfer_ctl_t * xfer = xfer_ctl_ptr(epnum,dir);
 
   xfer->buffer = buffer;
-  // xfer->ff     = NULL; // TODO support dcd_edpt_xfer_fifo API
+  xfer->ff     = NULL; // TODO support dcd_edpt_xfer_fifo API
   xfer->total_len = total_bytes;
   xfer->queued_len = 0;
 
@@ -908,6 +907,7 @@ bool dcd_edpt_xfer (uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t 
     {
         xfer->buffer = (uint8_t*)_setup_packet;
     }
+
     if(total_bytes > xfer->max_packet_size)
     {
       pcd_set_ep_rx_cnt(USB,epnum,xfer->max_packet_size);
@@ -923,7 +923,6 @@ bool dcd_edpt_xfer (uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t 
   return true;
 }
 
-#if 0 // TODO support dcd_edpt_xfer_fifo API
 bool dcd_edpt_xfer_fifo (uint8_t rhport, uint8_t ep_addr, tu_fifo_t * ff, uint16_t total_bytes)
 {
   (void) rhport;
@@ -934,7 +933,7 @@ bool dcd_edpt_xfer_fifo (uint8_t rhport, uint8_t ep_addr, tu_fifo_t * ff, uint16
   xfer_ctl_t * xfer = xfer_ctl_ptr(epnum,dir);
 
   xfer->buffer = NULL;
-  // xfer->ff     = ff; // TODO support dcd_edpt_xfer_fifo API
+  xfer->ff     = ff; // TODO support dcd_edpt_xfer_fifo API
   xfer->total_len = total_bytes;
   xfer->queued_len = 0;
 
@@ -954,7 +953,6 @@ bool dcd_edpt_xfer_fifo (uint8_t rhport, uint8_t ep_addr, tu_fifo_t * ff, uint16
   }
   return true;
 }
-#endif
 
 void dcd_edpt_stall (uint8_t rhport, uint8_t ep_addr)
 {
@@ -978,7 +976,10 @@ void dcd_edpt_clear_stall (uint8_t rhport, uint8_t ep_addr)
   { // IN
     ep_addr &= 0x7F;
 
-    pcd_set_ep_tx_status(USB,ep_addr, USB_EP_TX_NAK);
+    uint8_t const epnum = tu_edpt_number(ep_addr);
+    if (pcd_get_eptype(USB, epnum) !=  USB_EP_ISOCHRONOUS) {
+    	pcd_set_ep_tx_status(USB,ep_addr, USB_EP_TX_NAK);
+    }
 
     /* Reset to DATA0 if clearing stall condition. */
     pcd_clear_tx_dtog(USB,ep_addr);
@@ -1029,7 +1030,6 @@ static bool dcd_write_packet_memory(uint16_t dst, const void *__restrict src, si
   return true;
 }
 
-#if 0 // TODO support dcd_edpt_xfer_fifo API
 /**
   * @brief Copy from FIFO to packet memory area (PMA).
   *        Uses byte-access of system memory and 16-bit access of packet memory
@@ -1043,38 +1043,36 @@ static bool dcd_write_packet_memory_ff(tu_fifo_t * ff, uint16_t dst, uint16_t wN
 {
   // Since we copy from a ring buffer FIFO, a wrap might occur making it necessary to conduct two copies
   // Check for first linear part
-  void * src;
-  uint16_t len = tu_fifo_get_linear_read_info(ff, 0, &src, wNBytes);  // We want to read from the FIFO        - THIS FUNCTION CHANGED!!!
-  TU_VERIFY(len && dcd_write_packet_memory(dst, src, len));           // and write it into the PMA
-  tu_fifo_advance_read_pointer(ff, len);
+  tu_fifo_buffer_info_t info;
+  tu_fifo_get_read_info(ff, &info);  // We want to read from the FIFO
+  TU_VERIFY(info.len_lin && dcd_write_packet_memory(dst, info.ptr_lin, info.len_lin));           // and write it into the PMA
+  tu_fifo_advance_read_pointer(ff, info.len_lin);
 
   // Check for wrapped part
-  if (len < wNBytes)
+  if (info.len_wrap)
   {
-    // Get remaining wrapped length
-    uint16_t len2 = tu_fifo_get_linear_read_info(ff, 0, &src, wNBytes - len);
-    TU_VERIFY(len2);
-
     // Update destination pointer
-    dst += len;
+    dst += info.len_lin;
+    uint8_t* src = (uint8_t*)info.ptr_wrap;
+    uint16_t len2 = info.len_wrap;
 
     // Since PMA is accessed 16-bit wise we need to handle the case when a 16 bit value was split
-    if (len % 2)    // If len is uneven there is a byte left to copy
+    if (info.len_lin % 2)    // If len is uneven there is a byte left to copy
     {
-      // Since PMA can accessed only 16 bit-wise we copy the last byte again
-      tu_fifo_backward_read_pointer(ff, 1);                 // Move one byte back and copy two bytes for the PMA
-      tu_fifo_read_n(ff, (void *) &pma[PMA_STRIDE*(dst>>1)], 2);     // Since EP FIFOs must be of item size 1 this is safe to do
-      dst++;
+      TU_ASSERT(false); // TODO: Step through and check -> untested
+
+      uint16_t temp = ((uint8_t *)info.ptr_lin)[info.len_lin-1] | src[0] << 16; // CHECK endianess
+      pma[PMA_STRIDE*(dst>>1)] = temp;
+      src++;
       len2--;
     }
 
     TU_VERIFY(dcd_write_packet_memory(dst, src, len2));
-    tu_fifo_advance_write_pointer(ff, len2);
+    tu_fifo_advance_write_pointer(ff, info.len_wrap);
   }
 
   return true;
 }
-#endif
 
 /**
   * @brief Copy a buffer from packet memory area (PMA) to user memory area.
@@ -1111,7 +1109,6 @@ static bool dcd_read_packet_memory(void *__restrict dst, uint16_t src, size_t wN
   return true;
 }
 
-#if 0 // TODO support dcd_edpt_xfer_fifo API
 /**
   * @brief Copy a buffer from user packet memory area (PMA) to FIFO.
   *        Uses byte-access of system memory and 16-bit access of packet memory
@@ -1125,38 +1122,35 @@ static bool dcd_read_packet_memory_ff(tu_fifo_t * ff, uint16_t src, uint16_t wNB
 {
   // Since we copy into a ring buffer FIFO, a wrap might occur making it necessary to conduct two copies
   // Check for first linear part
-  void * dst;
-  uint16_t len = tu_fifo_get_linear_write_info(ff, 0, &dst, wNBytes);           // THIS FUNCTION CHANGED!!!!
-  TU_VERIFY(len && dcd_read_packet_memory(dst, src, len));
-  tu_fifo_advance_write_pointer(ff, len);
+  tu_fifo_buffer_info_t info;
+  tu_fifo_get_write_info(ff, &info);  // We want to read from the FIFO
+
+  TU_VERIFY(info.len_lin && dcd_read_packet_memory(info.ptr_lin, src, info.len_lin));
+  tu_fifo_advance_write_pointer(ff, info.len_lin);
 
   // Check for wrapped part
-  if (len < wNBytes)
+  if (info.len_wrap)
   {
-    // Get remaining wrapped length
-    uint16_t len2 = tu_fifo_get_linear_write_info(ff, 0, &dst, wNBytes - len);
-    TU_VERIFY(len2);
-
     // Update source pointer
-    src += len;
+    src += info.len_lin;
 
     // Since PMA is accessed 16-bit wise we need to handle the case when a 16 bit value was split
-    if (len % 2)    // If len is uneven there is a byte left to copy
+    if (info.len_lin % 2)    // If len is uneven there is a byte left to copy
     {
+      TU_ASSERT(false); //TODO: step through -> untested
       uint32_t temp = pma[PMA_STRIDE*(src>>1)];
-      *((uint8_t *)dst++) = ((temp >> 8) & 0xFF);
+      *((uint8_t *)info.ptr_wrap++) = ((temp >> 8) & 0xFF);
       src++;
-      len2--;
+      tu_fifo_advance_write_pointer(ff, 1);
+      info.len_wrap--;
     }
 
-    TU_VERIFY(dcd_read_packet_memory(dst, src, len2));
-    tu_fifo_advance_write_pointer(ff, len2);
+    TU_VERIFY(dcd_read_packet_memory(info.ptr_wrap, src, info.len_wrap));
+    tu_fifo_advance_write_pointer(ff, info.len_wrap);
   }
 
   return true;
 }
-
-#endif
 
 #endif
 
