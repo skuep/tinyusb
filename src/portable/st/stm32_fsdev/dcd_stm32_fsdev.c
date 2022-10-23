@@ -222,7 +222,7 @@ void dcd_init (uint8_t rhport)
   {
     asm("NOP");
   }
-	// Perform USB peripheral reset
+  // Perform USB peripheral reset
   USB->CNTR = USB_CNTR_FRES | USB_CNTR_PDWN;
   for(uint32_t i = 0; i<200; i++) // should be a few us
   {
@@ -526,13 +526,32 @@ static void dcd_ep_ctr_rx_handler(uint32_t wIstr)
 
     if (count != 0U)
     {
+      uint16_t addr;
+#if defined(ISOCHRONOUS_DOUBLEBUFFER)
+      uint32_t regVal = pcd_get_endpoint(USB, EPindex);
+
+      if ( (regVal & USB_EP_T_FIELD) == USB_EP_ISOCHRONOUS) {
+        if (regVal & USB_EP_DTOG_RX) {
+          /* Buffer 1 is now used by hardware, read from buffer 0 in software (AKA TX Buffer) */
+          addr = *pcd_ep_tx_address_ptr(USB, EPindex);
+        } else {
+          /* Buffer 0 is now used by hardware, read from Buffer 1 in software (AKA RX Buffer) */
+          addr = *pcd_ep_rx_address_ptr(USB, EPindex);
+        }
+      } else {
+        addr = *pcd_ep_rx_address_ptr(USB, EPindex);
+      }
+#else
+      addr = *pcd_ep_rx_address_ptr(USB, EPindex);
+#endif
+
       if (xfer->ff)
       {
-        dcd_read_packet_memory_ff(xfer->ff, *pcd_ep_rx_address_ptr(USB,EPindex), count);
+        dcd_read_packet_memory_ff(xfer->ff, addr, count);
       }
       else
       {
-        dcd_read_packet_memory(&(xfer->buffer[xfer->queued_len]), *pcd_ep_rx_address_ptr(USB,EPindex), count);
+        dcd_read_packet_memory(&(xfer->buffer[xfer->queued_len]), addr, count);
       }
 
       xfer->queued_len = (uint16_t)(xfer->queued_len + count);
@@ -681,6 +700,7 @@ void dcd_edpt0_status_complete(uint8_t rhport, tusb_control_request_t const * re
 
 static void dcd_pma_alloc_reset(void)
 {
+  open_ep_count = 0;
   ep_buf_ptr = DCD_STM32_BTABLE_BASE + 8*MAX_EP_COUNT; // 8 bytes per endpoint (two TX and two RX words, each)
   //TU_LOG2("dcd_pma_alloc_reset()\r\n");
   for(uint32_t i=0; i<MAX_EP_COUNT; i++)
@@ -779,7 +799,7 @@ bool dcd_edpt_open (uint8_t rhport, tusb_desc_endpoint_t const * p_endpoint_desc
   case TUSB_XFER_CONTROL:
     wType = USB_EP_CONTROL;
     break;
-  case TUSB_XFER_ISOCHRONOUS: // FIXME: Not yet supported
+  case TUSB_XFER_ISOCHRONOUS:
     wType = USB_EP_ISOCHRONOUS;
     break;
   case TUSB_XFER_BULK:
@@ -800,30 +820,44 @@ bool dcd_edpt_open (uint8_t rhport, tusb_desc_endpoint_t const * p_endpoint_desc
   // or being double-buffered (bulk endpoints)
   pcd_clear_ep_kind(USB,0);
 
-  pma_addr = dcd_pma_alloc(p_endpoint_desc->bEndpointAddress, epMaxPktSize);
-
+#if defined(ISOCHRONOUS_DOUBLEBUFFER)
+  if( (dir == TUSB_DIR_IN) || (wType == USB_EP_ISOCHRONOUS) )
+#else
   if(dir == TUSB_DIR_IN)
+#endif
   {
+    pma_addr = dcd_pma_alloc(epnum | TUSB_DIR_IN_MASK, epMaxPktSize);
     *pcd_ep_tx_address_ptr(USB, epnum) = pma_addr;
     pcd_set_ep_tx_cnt(USB, epnum, epMaxPktSize);
     pcd_clear_tx_dtog(USB, epnum);
 
-
     if(wType == USB_EP_ISOCHRONOUS) {
-    	pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_DIS);
+      pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_DIS);
     } else {
-    	pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_NAK);
+      pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_NAK);
     }
+
+    xfer_ctl_ptr(epnum, TUSB_DIR_IN)->max_packet_size = epMaxPktSize;
   }
+#if defined(ISOCHRONOUS_DOUBLEBUFFER)
+  if( (dir == TUSB_DIR_OUT) || (wType == USB_EP_ISOCHRONOUS) )
+#else
   else
+#endif
   {
+    pma_addr = dcd_pma_alloc(epnum & (uint8_t) ~TUSB_DIR_IN_MASK, epMaxPktSize);
     *pcd_ep_rx_address_ptr(USB, epnum) = pma_addr;
     pcd_set_ep_rx_cnt(USB, epnum, epMaxPktSize);
     pcd_clear_rx_dtog(USB, epnum);
-    pcd_set_ep_rx_status(USB, epnum, USB_EP_RX_NAK);
-  }
 
-  xfer_ctl_ptr(epnum, dir)->max_packet_size = epMaxPktSize;
+    if(wType == USB_EP_ISOCHRONOUS) {
+      pcd_set_ep_rx_status(USB, epnum, USB_EP_RX_DIS);
+    } else {
+      pcd_set_ep_rx_status(USB, epnum, USB_EP_RX_NAK);
+    }
+
+    xfer_ctl_ptr(epnum, TUSB_DIR_OUT)->max_packet_size = epMaxPktSize;
+  }
 
   return true;
 }
@@ -849,7 +883,7 @@ void dcd_edpt_close (uint8_t rhport, uint8_t ep_addr)
 
   if(dir == TUSB_DIR_IN)
   {
-    pcd_set_ep_tx_status(USB,epnum,USB_EP_TX_DIS);
+    pcd_set_ep_tx_status(USB,epnum, USB_EP_TX_DIS);
   }
   else
   {
@@ -869,7 +903,48 @@ static void dcd_transmit_packet(xfer_ctl_t * xfer, uint16_t ep_ix)
   {
     len = xfer->max_packet_size;
   }
+
+#if defined(ISOCHRONOUS_DOUBLEBUFFER)
+  uint32_t regVal = pcd_get_endpoint(USB, ep_ix);
+
+  if ( (regVal & USB_EP_T_FIELD) == USB_EP_ISOCHRONOUS) {
+    if (regVal & USB_EP_DTOG_TX) {
+      /* Buffer 1 will be used next by hardware (AKA RX Buffer) */
+      uint16_t oldAddr = *pcd_ep_rx_address_ptr(USB,ep_ix);
+
+      if (xfer->ff)
+      {
+        dcd_write_packet_memory_ff(xfer->ff, oldAddr, len);
+      }
+      else
+      {
+        dcd_write_packet_memory(oldAddr, &(xfer->buffer[xfer->queued_len]), len);
+      }
+      xfer->queued_len = (uint16_t)(xfer->queued_len + len);
+
+      pcd_set_ep_rx_cnt(USB,ep_ix,len);
+      pcd_set_ep_rx_status(USB, ep_ix, USB_EP_TX_VALID);
+    } else {
+      /* Buffer 0 will be used next by hardware (AKA TX Buffer) */
+      uint16_t oldAddr = *pcd_ep_tx_address_ptr(USB,ep_ix);
+
+      if (xfer->ff)
+      {
+        dcd_write_packet_memory_ff(xfer->ff, oldAddr, len);
+      }
+      else
+      {
+        dcd_write_packet_memory(oldAddr, &(xfer->buffer[xfer->queued_len]), len);
+      }
+      xfer->queued_len = (uint16_t)(xfer->queued_len + len);
+
+      pcd_set_ep_tx_cnt(USB,ep_ix,len);
+      pcd_set_ep_tx_status(USB, ep_ix, USB_EP_TX_VALID);
+    }
+  } else {
+#endif
   uint16_t oldAddr = *pcd_ep_tx_address_ptr(USB,ep_ix);
+
 
   if (xfer->ff)
   {
@@ -883,6 +958,9 @@ static void dcd_transmit_packet(xfer_ctl_t * xfer, uint16_t ep_ix)
 
   pcd_set_ep_tx_cnt(USB,ep_ix,len);
   pcd_set_ep_tx_status(USB, ep_ix, USB_EP_TX_VALID);
+#if defined(ISOCHRONOUS_DOUBLEBUFFER)
+  }
+#endif
 }
 
 bool dcd_edpt_xfer (uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t total_bytes)
@@ -978,7 +1056,7 @@ void dcd_edpt_clear_stall (uint8_t rhport, uint8_t ep_addr)
 
     uint8_t const epnum = tu_edpt_number(ep_addr);
     if (pcd_get_eptype(USB, epnum) !=  USB_EP_ISOCHRONOUS) {
-    	pcd_set_ep_tx_status(USB,ep_addr, USB_EP_TX_NAK);
+      pcd_set_ep_tx_status(USB,ep_addr, USB_EP_TX_NAK);
     }
 
     /* Reset to DATA0 if clearing stall condition. */
