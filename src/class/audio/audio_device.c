@@ -438,6 +438,8 @@ static bool audiod_verify_itf_exists(uint8_t itf, uint8_t *func_id);
 static bool audiod_verify_ep_exists(uint8_t ep, uint8_t *func_id);
 static uint8_t audiod_get_audio_fct_idx(audiod_function_t * audio);
 
+static bool set_fb_params_freq(audiod_function_t* audio, uint32_t sample_freq, uint32_t mclk_freq);
+
 #if CFG_TUD_AUDIO_ENABLE_ENCODING || CFG_TUD_AUDIO_ENABLE_DECODING
 static void audiod_parse_for_AS_params(audiod_function_t* audio, uint8_t const * p_desc, uint8_t const * p_desc_end, uint8_t const as_itf);
 
