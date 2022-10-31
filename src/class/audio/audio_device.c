@@ -2446,13 +2446,12 @@ bool tud_audio_n_fb_set(uint8_t func_id, uint32_t feedback)
     *(fb++) = (feedback >> 18) & 0xFF;
     // 4th byte is needed to work correctly with MS Windows
     *fb = 0;
-  }else
-#else
+  } else
+#endif
   {
     // Send value as-is, caller will choose the appropriate format
     _audiod_fct[func_id].feedback.value = feedback;
   }
-#endif
 
   // Schedule a transmit with the new value if EP is not busy - this triggers repetitive scheduling of the feedback value
   if (!usbd_edpt_busy(_audiod_fct[func_id].rhport, _audiod_fct[func_id].ep_fb))
